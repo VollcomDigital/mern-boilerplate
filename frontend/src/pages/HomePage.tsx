@@ -23,7 +23,7 @@ export default function HomePage() {
           <Link to="/register">
             <Button variant="primary">Get Started</Button>
           </Link>
-          <a href="https://github.com" target="_blank" rel="noopener noreferrer">
+          <a href="https://github.com/your-org/your-repo" target="_blank" rel="noopener noreferrer">
             <Button variant="secondary">View on GitHub</Button>
           </a>
         </div>

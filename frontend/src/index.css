@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light dark;
+  color: rgb(17 24 39);
+  background-color: rgb(249 250 251);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}

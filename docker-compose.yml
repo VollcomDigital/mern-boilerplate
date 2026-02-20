@@ -31,7 +31,7 @@ services:
       NODE_ENV: production
       PORT: 4000
       MONGODB_URI: mongodb://${MONGO_ROOT_USER:-root}:${MONGO_ROOT_PASSWORD:-password}@mongodb:27017/mern-boilerplate?authSource=admin
-      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-secure-random-string-at-least-32-chars}
+      JWT_SECRET: ${JWT_SECRET?A strong JWT_SECRET must be provided for production}
       JWT_EXPIRES_IN: 7d
       CORS_ORIGIN: http://localhost
       LOG_LEVEL: info

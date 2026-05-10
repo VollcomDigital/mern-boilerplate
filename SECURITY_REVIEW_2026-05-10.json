@@ -1,0 +1,71 @@
+{
+  "scan_metadata": {
+    "repository": "VollcomDigital/mern-boilerplate",
+    "branch": "main",
+    "scan_date": "2026-05-10T09:01:00Z",
+    "scan_type": "at-rest-security-review",
+    "scanner": "vulnerability-hunter-agent"
+  },
+  "summary": {
+    "critical": 1,
+    "high": 1,
+    "medium": 1,
+    "total": 3
+  },
+  "findings": [
+    {
+      "id": "VULN-001",
+      "severity": "critical",
+      "location": "backend/src/modules/users/user.controller.ts:41-52",
+      "description": "**Privilege Escalation via Mass Assignment on PATCH /api/users/me**\n\nThe `updateMe` controller passes the raw `req.body` directly to `userService.updateUser()` without any input validation or field allowlisting. The `PATCH /me` route has no `validate()` middleware. The `updateUser` service function calls `User.findByIdAndUpdate(id, data, ...)` which will update any field defined in the Mongoose schema, including the `role` field (`enum: ['user', 'admin']`). An authenticated user can set their own role to `admin` and gain full administrative access.",
+      "impact": "Any authenticated user can escalate their privileges to admin by sending a single PATCH request with `{\"role\": \"admin\"}`. After re-authenticating (login), the new JWT token will contain `role: 'admin'`, granting access to all admin-only endpoints (e.g., `GET /api/users/` which lists all users). This breaks the entire authorization model of the application.",
+      "verified": true,
+      "attack_path": "1. Attacker registers a normal user account via `POST /api/auth/register`.\n2. Attacker sends `PATCH /api/users/me` with body `{\"role\": \"admin\"}`.\n3. The request passes through `authenticate` middleware (valid JWT cookie) but hits NO validation middleware.\n4. `user.controller.ts:48` passes raw `req.body` (containing `role: 'admin'`) to `userService.updateUser()`.\n5. `user.service.ts:48` calls `User.findByIdAndUpdate(id, {role: 'admin'}, {runValidators: true})`.\n6. Mongoose validates `'admin'` against the enum `['user', 'admin']` — it passes.\n7. The user's role is updated to `admin` in the database.\n8. Attacker logs in again via `POST /api/auth/login` to get a new JWT with `role: 'admin'`.\n9. Attacker now accesses admin-only endpoints like `GET /api/users/`.",
+      "evidence": [
+        "backend/src/modules/users/user.routes.ts:11 — no validate() middleware on PATCH /me",
+        "backend/src/modules/users/user.controller.ts:48 — passes raw req.body to updateUser()",
+        "backend/src/modules/users/user.service.ts:48 — findByIdAndUpdate with arbitrary data object",
+        "backend/src/modules/users/user.model.ts:38-42 — role field with enum ['user', 'admin'] in schema"
+      ],
+      "remediation": "Add a Zod validation schema for the update endpoint that only allows `name` and `email` fields:\n\n```typescript\n// auth.schemas.ts or user.schemas.ts\nexport const updateMeSchema = z.object({\n  name: z.string().min(1).max(100).optional(),\n  email: z.string().email().optional(),\n});\n```\n\nApply the validation middleware on the route:\n\n```typescript\n// user.routes.ts\nrouter.patch('/me', validate({ body: updateMeSchema }), updateMe);\n```\n\nAlternatively, use an explicit allowlist in the service layer:\n\n```typescript\nconst { name, email } = data;\nconst sanitized = { ...(name && { name }), ...(email && { email }) };\nconst user = await User.findByIdAndUpdate(id, sanitized, { new: true, runValidators: true });\n```",
+      "poc_video_url": null,
+      "poc_video_notes": "PoC video not feasible in this headless CI environment. The exploit is trivially demonstrable with a single curl command: `curl -X PATCH http://localhost:4000/api/users/me -H 'Content-Type: application/json' -d '{\"role\":\"admin\"}' --cookie 'token=<valid_jwt>'`"
+    },
+    {
+      "id": "VULN-002",
+      "severity": "high",
+      "location": "docker-compose.yml:34",
+      "description": "**Predictable Default JWT Secret in Production Docker Configuration**\n\nThe production `docker-compose.yml` sets `JWT_SECRET` with a shell-variable fallback to the well-known string `change-me-to-a-secure-random-string-at-least-32-chars`. The backend's environment validation (`env.ts:7`) only checks `z.string().min(32)`, which this 50-character default passes. If the `JWT_SECRET` environment variable is not explicitly set before running `docker compose up`, the application starts in `NODE_ENV=production` with a publicly known signing secret.",
+      "impact": "An attacker who reads this public repository can forge arbitrary JWT tokens with any `userId`, `email`, and `role` (including `admin`). This grants complete authentication bypass — the attacker can impersonate any user, create admin sessions, and access all protected endpoints without valid credentials.",
+      "verified": true,
+      "attack_path": "1. Attacker reads `docker-compose.yml` from the public GitHub repository.\n2. Attacker extracts the default JWT secret: `change-me-to-a-secure-random-string-at-least-32-chars`.\n3. Attacker crafts a JWT payload: `{\"userId\": \"<target_id>\", \"email\": \"admin@example.com\", \"role\": \"admin\"}`.\n4. Attacker signs the JWT with the known secret using HS256 (the default algorithm).\n5. Attacker sets the forged token as the `token` cookie.\n6. The `authenticate` middleware (`auth.ts:25`) calls `jwt.verify(token, env.JWT_SECRET)` — verification succeeds because the secret matches.\n7. `req.user` is set to the forged payload, granting admin access to all endpoints.",
+      "evidence": [
+        "docker-compose.yml:34 — JWT_SECRET: ${JWT_SECRET:-change-me-to-a-secure-random-string-at-least-32-chars}",
+        "docker-compose.yml:31 — NODE_ENV: production",
+        "backend/src/config/env.ts:7 — JWT_SECRET: z.string().min(32) — no check against known defaults",
+        "backend/src/middleware/auth.ts:25 — jwt.verify(token, env.JWT_SECRET) with no algorithm restriction"
+      ],
+      "remediation": "1. Remove the default fallback for JWT_SECRET in docker-compose.yml — require it to be explicitly set:\n\n```yaml\nJWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}\n```\n\n2. Add a runtime check in `env.ts` that rejects known insecure defaults when `NODE_ENV=production`:\n\n```typescript\nconst KNOWN_INSECURE_SECRETS = [\n  'change-me-to-a-secure-random-string',\n  'change-me-to-a-secure-random-string-at-least-32-chars',\n];\n\nif (result.data.NODE_ENV === 'production' &&\n    KNOWN_INSECURE_SECRETS.some(s => result.data.JWT_SECRET.includes(s))) {\n  throw new Error('JWT_SECRET must not use a default/example value in production');\n}\n```\n\n3. Specify the allowed algorithm in `jwt.verify`: `jwt.verify(token, env.JWT_SECRET, { algorithms: ['HS256'] })`",
+      "poc_video_url": null,
+      "poc_video_notes": "PoC video not feasible — requires a running deployment with default configuration. The attack is trivially scriptable using the `jsonwebtoken` npm package to sign a forged token."
+    },
+    {
+      "id": "VULN-003",
+      "severity": "medium",
+      "location": "docker-compose.yml:7-11,33",
+      "description": "**MongoDB Exposed with Default Credentials in Production Docker Configuration**\n\nThe production `docker-compose.yml` exposes MongoDB port 27017 to the host network (`ports: '27017:27017'`) and uses default credentials (`root`/`password`) via shell-variable fallbacks. The backend connection URI on line 33 embeds these same defaults. Any host with network access to the Docker host can directly connect to MongoDB with root privileges.",
+      "impact": "An attacker on the same network (or with access to the host) can connect directly to MongoDB, bypassing all application-layer authentication, authorization, and rate limiting. The attacker can read, modify, or delete all data including user records, password hashes, and roles. Combined with the ability to modify user roles directly in the database, this grants full application compromise.",
+      "verified": true,
+      "attack_path": "1. Attacker discovers the Docker host (e.g., via network scan finding port 27017 open).\n2. Attacker connects using `mongosh mongodb://root:password@<host>:27017/mern-boilerplate?authSource=admin`.\n3. Default credentials grant root access to the entire MongoDB instance.\n4. Attacker reads all user documents: `db.users.find()`.\n5. Attacker escalates any user to admin: `db.users.updateOne({email: 'target@example.com'}, {$set: {role: 'admin'}})`.\n6. Attacker can also exfiltrate password hashes or insert backdoor admin accounts.",
+      "evidence": [
+        "docker-compose.yml:7 — MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}",
+        "docker-compose.yml:8 — MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}",
+        "docker-compose.yml:10-11 — ports: '27017:27017' exposes MongoDB to host",
+        "docker-compose.yml:33 — MONGODB_URI contains same default credentials in connection string"
+      ],
+      "remediation": "1. Remove the host port mapping for MongoDB in production — only backend needs access via the Docker network:\n\n```yaml\nservices:\n  mongodb:\n    # Remove 'ports' section entirely for production\n    # ports:\n    #   - '27017:27017'\n```\n\n2. Require credentials via mandatory env vars (no defaults):\n\n```yaml\nMONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:?MONGO_ROOT_USER must be set}\nMONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}\n```\n\n3. Use Docker secrets or a `.env` file excluded from version control for sensitive values.",
+      "poc_video_url": null,
+      "poc_video_notes": "PoC video not feasible — requires a running Docker deployment. The attack is demonstrable with a single mongosh command."
+    }
+  ]
+}
